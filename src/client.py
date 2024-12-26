@@ -1,35 +1,301 @@
-import webbrowser
-import atexit
-import requests 
-import threading  
-import queue
+import socket
+import threading
 import json
-import socket  # 用于创建网络通信的socket
-import threading  # 用于创建和管理线程
-import tkinter as tk  # 用于创建GUI
-from tkinter import messagebox  # 用于显示消息框
-import ctypes  # 用于调用Windows API函数
-import shelve  # 用于创建简单的持久化数据库
-import pickle  # 用于序列化和反序列化Python对象
-import os  # 用于操作系统功能，如文件路径操作
-import appdirs  # 用于获取应用程序数据目录的库
-import time  # 用于时间相关的功能
-import mysql.connector  # 用于连接MySQL数据库
-from datetime import datetime
+import tkinter as tk
+from tkinter import messagebox
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
+# import mysql.connector
+import time
+import atexit
+
+import queue
+
+# 添加消息队列
+message_queue = queue.Queue()
+root = None
+
+# 其他导入保持不变
 
 # 全局变量用于存储socket客户端对象和连接状态
+global client_socket, receive_thread, connected
 client_socket = None
 receive_thread = None
 connected = False
 
+# 用户当前窗口信息
+global active_chatrooms, announcement_list, board_ui, login_ui
+active_chatrooms = {}
+announcement_list = {}
+board_ui = None
+login_ui = None
+
+# 用户登录信息
+global current_user_is_login, current_user_id, current_username, cuurent_user_is_admin
+current_user_is_login = False
 current_user_id = None
 current_username = None
+cuurent_user_is_admin = False
 
-import tkinter as tk
-import time
+def connect_to_server():
+    global client_socket, connected
+    try:
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_socket.connect(('localhost', 10086))  # 服务器地址和端口
+        connected = True
+        print("成功连接到服务器")
+        # 启动接收线程
+        receive_thread = threading.Thread(target=receive_messages, daemon=True)
+        receive_thread.start()
+        
+        # 启动消息处理
+        root.after(100, process_message_queue)
+    except Exception as e:
+        print(f"无法连接到服务器: {e}")
+        messagebox.showerror("连接错误", f"无法连接到服务器: {e}")
+        time.sleep(5)
+        connect_to_server()
 
+def receive_messages():
+    global connected
+    try:
+        while connected:
+            # 接收消息长度
+            msg_length_data = client_socket.recv(4)
+            if not msg_length_data:
+                break
+            msg_length = int.from_bytes(msg_length_data, byteorder='big')
+            # 接收实际消息
+            msg_data = client_socket.recv(msg_length).decode()
+            message = json.loads(msg_data)
+            # 将消息放入队列而不是直接处理
+            message_queue.put(message)
+    except Exception as e:
+        print(f"接收消息错误: {e}")
+    # finally:
+    #     client_socket.close()
+    #     connected = False
+    #     print("与服务器的连接已关闭")
+
+def process_message_queue():
+    try:
+        while True:
+            # 非阻塞方式检查队列
+            try:
+                message = message_queue.get_nowait()
+                handle_server_message(message)
+            except queue.Empty:
+                break
+    except Exception as e:
+        print(f"处理消息队列错误: {e}")
+    # 无论如何，都要在下一个周期调度   
+    if connected:
+        root.after(100, process_message_queue)
+
+def handle_server_message(message):
+    print(f"收到消息: {json.dumps(message, ensure_ascii=False)}")
+    action = message.get("action")
+    if action == "receive_message":
+        status = message.get("status")
+        if status == "success":
+            sender_id = message.get("sender_id")
+            sender_name = message.get("sender_name")
+            chat_id = message.get("chat_id")
+            content = message.get("content")
+            timestamp = message.get("timestamp")
+            print(f"处理消息: sender_id={sender_id}, sender_name={sender_name}, content={content}, timestamp={timestamp}")
+            # 使用 after 方法将 UI 更新操作调度到主线程
+            if chat_id in active_chatrooms:
+                print(f"在聊天室中显示消息: {content}")
+                active_chatrooms[chat_id].master.after(0, lambda: active_chatrooms[chat_id].display_message(content, sender_id, sender_name, timestamp))
+        else:
+            error_msg = message.get("message")
+            print(f"收发消息失败: {error_msg}")
+    elif action == "load_recent_messages":
+        status = message.get("status")
+        if status == "success":
+            chat_id = message.get("chat_id")
+            messages = message.get("messages")
+            print(f"处理最近消息: chat_id={chat_id}, messages={messages}")
+            if chat_id in active_chatrooms:
+                active_chatrooms[chat_id].master.after(0, lambda: active_chatrooms[chat_id].display_messages_upper(messages))
+        else:
+            error_msg = message.get("message")
+            print(f"加载最近消息失败: {error_msg}")
+    elif action == "refresh_older_messages":
+        status = message.get("status")
+        if status == "success":
+            chat_id = message.get("chat_id")
+            messages = message.get("messages")
+            print(f"处理更早消息: chat_id={chat_id}, messages={messages}")
+            if chat_id in active_chatrooms:
+                active_chatrooms[chat_id].master.after(0, lambda: active_chatrooms[chat_id].display_messages_upper(messages))
+        else:
+            error_msg = message.get("message")
+            print(f"加载更早消息失败: {error_msg}")
+    elif action == "login":
+        status = message.get("status")
+        print(f"处理登录: status={status}")
+        if status == "success":
+            global current_user_id, current_username, cuurent_user_is_admin, login_ui
+            current_user_id = message.get("user_id")
+            cuurent_user_is_admin = message.get("is_admin")
+            current_username = message.get("username")
+            print(f"登录成功: user_id={current_user_id}, username={current_username}, is_admin={cuurent_user_is_admin}")
+            login_ui.master.after(0, login_ui.login_success)
+        else:
+            error_msg = message.get("message")
+            print(f"登录失败: {error_msg}")
+            login_ui.master.after(0, lambda: login_ui.show_temporary_message("登录失败", error_msg))
+            if status == "no_user":
+                # 未找到用户，提示用户注册
+                login_ui.master.after(0, login_ui.register)
+    elif action == "register":
+        status = message.get("status")
+        print(f"处理注册: status={status}")
+        if status == "success":
+            print("注册成功")
+            login_ui.master.after(0, login_ui.register_success)
+        else:
+            error_msg = message.get("message")
+            print(f"注册失败: {error_msg}")
+            login_ui.master.after(0, lambda: login_ui.show_temporary_message("注册失败", error_msg))
+    elif action == "show_announce_detail":
+        status = message.get("status")
+        print(f"处理公告详情: status={status}")
+        if status == "success":
+            announcement_id = message.get("announcement_id")
+            title = message.get("title")
+            content = message.get("content")
+            is_add_in = message.get("is_add_in")
+            print(f"公告详情: announcement_id={announcement_id}, title={title}, content={content}, is_add_in={is_add_in}")
+            global board_ui
+            if board_ui:
+                board_ui.master.after(0, lambda: board_ui.show_detail_content(announcement_id, title, content, is_add_in))
+            else:
+                print("公告详情窗口不存在")
+        else:
+            error_msg = message.get("message")
+            print(f"获取公告详情失败: {error_msg}")
+            messagebox.showerror("获取公告详情失败", error_msg)
+            
+    elif action == "refresh_announcement":
+        status = message.get("status")
+        print(f"处理刷新公告: status={status}")
+        if status == "success":
+            announcements_data = message.get("announcements")
+            print(f"公告数据: {announcements_data}")
+            if board_ui:
+                board_ui.master.after(0, lambda: board_ui.refresh(announcements_data))
+            else:
+                print("公告板窗口不存在")
+        else:
+            error_msg = message.get("message")
+            print(f"刷新公告失败: {error_msg}")
+            messagebox.showerror("刷新公告失败", error_msg)
+    elif action == "refresh_my_announcement":
+        status = message.get("status")
+        print(f"处理刷新我的公告: status={status}")
+        if status == "success":
+            announcements_data = message.get("my_announcements")
+            print(f"我的公告数据: {announcements_data}")
+            if board_ui:
+                board_ui.master.after(0, lambda: board_ui.refresh(announcements_data))
+            else:
+                print("公告板窗口不存在")
+        else:
+            error_msg = message.get("message")
+            print(f"刷新我的公告失败: {error_msg}")
+            messagebox.showerror("刷新我的公告失败", error_msg)
+    elif action == "follow_announcement":
+        status = message.get("status")
+        print(f"处理关注公告: status={status}")
+        if status == "success":
+            announcement_id = message.get("announcement_id")
+            print(f"关注公告成功: announcement_id={announcement_id}")
+            if board_ui:
+                board_ui.master.after(0, lambda: board_ui.show_all_announcements())
+                board_ui.master.after(0, lambda: board_ui.show_temporary_message("关注公告成功", "关注公告成功"))
+            else:
+                print("公告板窗口不存在")
+        else:
+            error_msg = message.get("message")
+            print(f"关注公告失败: {error_msg}")
+            if board_ui:
+                board_ui.master.after(0, lambda: board_ui.show_temporary_message("关注公告失败", error_msg))
+            else:
+                print("公告板窗口不存在")
+    elif action == "disfollow_announcement":
+        status = message.get("status")
+        print(f"处理取消关注公告: status={status}")
+        if status == "success":
+            announcement_id = message.get("announcement_id")
+            print(f"取消关注公告成功: announcement_id={announcement_id}")
+            if board_ui:
+                board_ui.master.after(0, lambda: board_ui.show_all_announcements())
+                board_ui.master.after(0, lambda: board_ui.show_temporary_message("取消关注公告成功", "取消关注公告成功"))
+            else:
+                print("公告板窗口不存在")
+        else:
+            error_msg = message.get("message")
+            print(f"取消关注公告失败: {error_msg}")
+            if board_ui:
+                board_ui.master.after(0, lambda: board_ui.show_temporary_message("取消关注公告失败", error_msg))
+            else:
+                print("公告板窗口不存在")
+    elif action == "submit_announcement":
+        status = message.get("status")
+        message = message.get("message")
+        print(f"处理提交公告: status={status}")
+        if status == "success":
+            print("提交公告成功")
+            if board_ui:
+                board_ui.master.after(0, lambda: board_ui.show_all_announcements())
+                board_ui.master.after(0, lambda: board_ui.show_temporary_message("提交公告成功", message))
+                board_ui.publish_window.destroy()
+            else:
+                print("公告板窗口不存在")
+        else:
+            print(f"提交公告失败: {error_msg}")
+            if board_ui:
+                board_ui.master.after(0, lambda: board_ui.show_temporary_message("提交公告失败", message))
+            else:
+                print("公告板窗口不存在")
+    elif action == "show_user_details":
+        status = message.get("status")
+        print(f"处理用户详情: status={status}")
+        if status == "success":
+            sender_id = message.get("sender_id")
+            username = message.get("username")
+            email = message.get("email")
+            college = message.get("college")
+            bio = message.get("bio")
+            chat_id = message.get("chat_id")
+            is_admin = message.get("is_admin")
+            print(f"用户详情: sender_id={sender_id}, username={username}, email={email}, college={college}, bio={bio}")
+            if chat_id in active_chatrooms:
+                active_chatrooms[chat_id].master.after(0, lambda: active_chatrooms[chat_id].show_user_details(sender_id, username, email, college, is_admin, bio))
+            else:
+                print("聊天室窗口不存在")
+        else:
+            error_msg = message.get("message")
+            print(f"获取用户详情失败: {error_msg}")
+            if board_ui:
+                board_ui.master.after(0, lambda: board_ui.show_temporary_message("获取用户详情失败", error_msg))
+            else:
+                print("公告板窗口不存在")
+    # 处理其他类型的消息
+    else:
+        print(f"未知消息类型: {action}")
+
+def send_message_to_server(message):
+    try:
+        msg = json.dumps(message).encode()
+        msg_length = len(msg).to_bytes(4, byteorder='big')
+        client_socket.sendall(msg_length + msg)
+    except Exception as e:
+        print(f"发送消息错误: {e}")
+        messagebox.showerror("发送错误", f"发送消息失败: {e}")
 
 class LoginGUI:
     def __init__(self, master):
@@ -75,77 +341,29 @@ class LoginGUI:
         # 登录的逻辑
         username_or_email = self.username_entry.get()
         password = self.password_entry.get()
-        cursor.execute("SELECT * FROM UserInfo WHERE username = %s OR email = %s", (username_or_email, username_or_email))
-        user = cursor.fetchone()
-        if user:
-            if user[2] == password:  # Assuming the password is the third field in the UserInfo table
-                self.show_temporary_message("登录成功", "登录成功")
-                global is_login, user_id, user_name
-                is_login = True
-                user_id = user[0]
-                user_name = user[1]
-                self.master.withdraw()
-                board_window = ttk.Window()
-                style = ttk.Style()
-                style.theme_use('')
-                board = BoardGUI(board_window, style)
-            else:
-                self.show_temporary_message("登录失败", "密码错误")
-        else:
-            self.show_temporary_message("登录失败", "用户不存在")
-            self.register()
-
-    # Try to login use server
-    # def login(self):
-    #     username_or_email = self.username_entry.get()
-    #     password = self.password_entry.get()
-
-    #     # Prepare login data
-    #     login_data = {
-    #         "action": "login",
-    #         "username": username_or_email,
-    #         "password": password
-    #     }
-
-    #     try:
-    #         # Send login data to the server
-    #         message = json.dumps(login_data)
-    #         client_socket.send(len(message).to_bytes(4, byteorder='big'))  # Send message length
-    #         client_socket.send(message.encode())  # Send message data
-
-    #         # Wait for the server response
-    #         response_length_data = client_socket.recv(4)
-    #         if not response_length_data:
-    #             raise Exception("服务器未响应")
-    #         response_length = int.from_bytes(response_length_data, byteorder='big')
-    #         response_data = client_socket.recv(response_length).decode()
-    #         response = json.loads(response_data)
-
-    #         # Handle server response
-    #         status = response.get("status")
-    #         if status == "success":
-    #             global is_login, user_id, user_name
-    #             is_login = True
-    #             user_id = response.get("user_id")
-    #             user_name = self.username_entry.get()  # Save username for reference
-    #             self.show_temporary_message("登录成功", "登录成功")
-    #             self.master.withdraw()
-    #             board_window = ttk.Window()
-    #             style = ttk.Style()
-    #             style.theme_use('')
-    #             board = BoardGUI(board_window, style)
-    #         else:
-    #             error_msg = response.get("message", "登录失败")
-    #             self.show_temporary_message("登录失败", error_msg)
-
-    #     except Exception as e:
-    #         print(f"登录时发生错误: {e}")
-    #         messagebox.showerror("登录错误", f"登录失败: {e}")
-
-
-   
-            
-   
+        
+        if not connected:
+            self.show_temporary_message("连接错误", "无法连接到服务器")
+            return
+        
+        # 发送登录请求到服务器
+        login_request = {
+            "action": "login",
+            "username": username_or_email,
+            "password": password
+        }
+        send_message_to_server(login_request)
+        
+    def login_success(self):
+        self.show_temporary_message("登录成功", "登录成功")
+        global current_user_is_login, board_ui
+        current_user_is_login = True       
+        self.master.withdraw()
+        board_window = ttk.Window()
+        style = ttk.Style()
+        style.theme_use('')
+        board_ui = BoardGUI(board_window, style)
+    
     def register(self):
         # 注册的逻辑
         register_window = tk.Toplevel(self.master)
@@ -213,84 +431,65 @@ class LoginGUI:
         if password != confirm_password:
             self.show_temporary_message("注册失败", "两次输入的密码不一致")
             return
-        cursor.execute("SELECT * FROM UserInfo WHERE username = %s", (username,))
-        user = cursor.fetchone()
-        if user:
-            self.show_temporary_message("注册失败", "用户名已存在")
-            return
-        else:
-            cursor.execute("INSERT INTO UserInfo (username, passwoord, email, college, bio) VALUES (%s, %s, %s, %s, %s)", (username, password, email, college, bio))
-            db.commit()
-            self.show_temporary_message("注册成功", "注册成功，请登录")
-            self.register_window.destroy()
+        register_request = {
+            "action": "register",
+            "username": username,
+            "password": password,
+            "email": email,
+            "college": college,
+            "bio": bio
+        }
+        send_message_to_server(register_request)
+    
+    def register_success(self):
+        self.show_temporary_message("注册成功", "注册成功，请登录")
+        self.register_window.destroy()
+        
 
 class Announcement:
     def __init__(self, master, announcement_id, title, department, deadline, participants, initiator, announcement_type):
         self.frame = tk.Frame(master, bd=2, relief=tk.RIDGE, padx=10, pady=10)
         
         # 标题
-        self.title_label = tk.Label(self.frame, text=title, font=('宋体', 14, 'bold'), anchor='w')
+        self.title_label = tk.Label(self.frame, text=title, font=('微软雅黑', 14, 'bold'), anchor='w')
         self.title_label.grid(row=0, column=0, columnspan=2, sticky='w', pady=5)
         
         # 院系
-        self.department_label = tk.Label(self.frame, text=department, font=('宋体', 12), anchor='w')
+        self.department_label = tk.Label(self.frame, text=department, font=('微软雅黑', 12), anchor='w')
         self.department_label.grid(row=1, column=1, sticky='w', pady=2)
         
         # 截止时间
-        deadline_formatted = deadline.strftime('%Y-%m-%d %H:%M')
-        self.deadline_label = tk.Label(self.frame, text=f"截止时间：{deadline_formatted}", font=('宋体', 12), anchor='w', fg='black')
+        deadline_formatted = deadline
+        self.deadline_label = tk.Label(self.frame, text=f"截止时间：{deadline_formatted}", font=('微软雅黑', 12), anchor='w', fg='black')
         self.deadline_label.grid(row=3, column=0, sticky='w', pady=2)
         
         # 参与人数
-        self.participants_label = tk.Label(self.frame, text=f"参与人数: {participants}", font=('宋体', 12), anchor='w')
+        self.participants_label = tk.Label(self.frame, text=f"参与人数: {participants}", font=('微软雅黑', 12), anchor='w')
         self.participants_label.grid(row=2, column=1, sticky='w', pady=2)
         
         # 发起人
-        self.initiator_label = tk.Label(self.frame, text=f"by {initiator}", font=('宋体', 12), anchor='w')
+        self.initiator_label = tk.Label(self.frame, text=f"by {initiator}", font=('微软雅黑', 12), anchor='w')
         self.initiator_label.grid(row=1, column=0, sticky='w', pady=2)
         
         # 公告类型
-        self.announcement_type_label = tk.Label(self.frame, text=announcement_type, font=('宋体', 12), anchor='w')
+        self.announcement_type_label = tk.Label(self.frame, text=announcement_type, font=('微软雅黑', 12), anchor='w')
         self.announcement_type_label.grid(row=2, column=0, sticky='w', pady=2)
         
         # 详情按钮
-        self.details_button = tk.Button(self.frame, text="查看详情", command=lambda: self.show_details(announcement_id=announcement_id, title=title))
+        self.details_button = tk.Button(self.frame, text="查看详情", command=lambda: self.show_details(announcement_id=announcement_id))
         self.details_button.grid(row=3, column=1, pady=2, sticky='e')
         
         self.frame.grid(sticky='nsew')
         self.announcement_id = announcement_id
-        
-    def show_details(self, announcement_id, title):
-        details_window = tk.Toplevel(self.frame)
-        details_window.title("详情")
-        details_window.geometry("600x400")
-        
-        details_label = tk.Label(details_window, text=f"公告标题: {title}", font=('宋体', 12))
-        details_label.pack(pady=20)
-        
+    
+    def show_details(self, announcement_id):
         # 从数据库中获取公告的具体内容
-        cursor.execute("SELECT content FROM BoardList WHERE idBoardList = %s", (announcement_id,))
-        content = cursor.fetchone()[0]
-        
-        content_label = tk.Label(details_window, text=f"公告内容: {content}", font=('宋体', 12), wraplength=500, justify='left')
-        content_label.pack(pady=10)
-        
-        # 判断是否已经加入群聊
-        cursor.execute("SELECT * FROM UserAnnounceDiagram WHERE user_id = %s AND announce_id = %s", (user_id, announcement_id))
-        user_announcement = cursor.fetchone()
-        
-        if user_announcement:
-            follow_button = tk.Button(details_window, text="取消关注", command=lambda: self.disfollow_announcement(user_id, announcement_id, details_window))
-            follow_button.pack(pady=10)
-            chatroom_frame = tk.Frame(details_window)
-            chatroom_frame.pack(fill='both', expand=True)
-            chatroom = ChatroomGUI(chat_id=announcement_id)
-            chatroom.master = chatroom_frame
-            chatroom.master.pack(fill='both', expand=True)
-            chatroom.run()
-        else:
-            follow_button = tk.Button(details_window, text="关注该通知", command=lambda: self.follow_announcement(user_id, announcement_id, details_window))
-            follow_button.pack(pady=10)
+        self.show_temporary_message("获取详情", "正在获取公告详情...")
+        send_message_to_server({
+            "action": "show_announcement_detail",
+            "announcement_id": announcement_id,
+            "user_id": current_user_id
+        })
             
     def show_temporary_message(self, title, message):
         # 创建一个顶级窗口
@@ -304,30 +503,7 @@ class Announcement:
         
         # 设置定时器，3秒后关闭窗口
         temp_window.after(1000, temp_window.destroy)
-            
-    def follow_announcement(self, user_id, announcement_id, show_details_window):
-        try:
-            cursor.execute("INSERT INTO UserAnnounceDiagram (user_id, announce_id) VALUES (%s, %s)", (user_id, announcement_id))
-            db.commit()
-            self.show_temporary_message("关注成功", "关注成功")
-            show_details_window.destroy()
-        except mysql.connector.Error as err:
-            print(f"Error: {err}")
-            self.show_temporary_message("关注失败", f"关注失败: {err}")
-            db.rollback()
-            
-    def disfollow_announcement(self, user_id, announcement_id, show_details_window):
-        try:
-            cursor.execute("DELETE FROM UserAnnounceDiagram WHERE user_id = %s AND announce_id = %s", (user_id, announcement_id))
-            db.commit()
-            self.show_temporary_message("取消关注成功", "取消关注成功")
-            show_details_window.destroy()
-        except mysql.connector.Error as err:
-            print(f"Error: {err}")
-            self.show_temporary_message("取消关注失败", f"取消关注失败: {err}")
-            db.rollback()
-            
-
+    
 class BoardGUI:
     def __init__(self, master, style=None):
         self.master = master
@@ -338,6 +514,9 @@ class BoardGUI:
         self.master.grid_columnconfigure(0, weight=1)
         
         self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        self.detail_window = None
+        self.publish_window = None
         
         # 主题选择框
         theme_names = style.theme_names()
@@ -382,7 +561,7 @@ class BoardGUI:
         
         self.canvas.pack(side="left", fill="both", expand=True)
         self.scrollbar.pack(side="right", fill="y")
-
+    
         # 绑定滚动事件
         self.canvas.bind_all('<MouseWheel>', lambda event: self.canvas.yview_scroll(int(-1*(event.delta/120)), "units"))
         self.canvas.bind_all('<Button-4>', lambda event: self.canvas.yview_scroll(-1, "units"))  # For Linux
@@ -400,24 +579,11 @@ class BoardGUI:
         
         self.current_tab = "all"
         self.highlight_current_tab()
-        # 从数据库中获取公告数据
-        cursor.execute("SELECT idBoardList, headline, college, deadline, join_num, proposer_name, type FROM BoardList")
-        announcements_data = cursor.fetchall()
         
-        # 从 UserAnnounceDiagram 中更新 join_num
-        for announcement in announcements_data:
-            cursor.execute("SELECT COUNT(*) FROM UserAnnounceDiagram WHERE announce_id = %s", (announcement[0],))
-            join_num = cursor.fetchone()[0]
-            cursor.execute("UPDATE BoardList SET join_num = %s WHERE idBoardList = %s", (join_num, announcement[0]))
-            db.commit()
-        
-        # 更新 join_num 后重新获取公告数据
-        cursor.execute("SELECT idBoardList, headline, college, deadline, join_num, proposer_name, type FROM BoardList")
-        announcements_data = cursor.fetchall()
-        
-        # 创建公告对象列表
         self.announcements = []
-        self.create_announcements(announcements_data)
+        self.chatroom = None  # 添加一个属性用于存储当前聊天室
+        # 初始显示所有公告
+        self.show_all_announcements()
         
     def create_announcements(self, announcements_data):
         def update_grid(event=None):
@@ -426,37 +592,73 @@ class BoardGUI:
             for i, announcement in enumerate(self.announcements):
                 announcement.frame.grid(row=i // columns, column=i % columns, padx=10, pady=10, sticky='nsew')
 
-        for announcement_data in announcements_data:
-            announcement = Announcement(self.scrollable_frame, *announcement_data)
+        for announcement_id, announcement_data in announcements_data.items():
+            announcement = Announcement(self.scrollable_frame, announcement_id, announcement_data['headline'], announcement_data['college'], announcement_data['deadline'], announcement_data['join_num'], announcement_data['proposer_name'], announcement_data['type'])
             self.announcements.append(announcement)
+            announcement_list[announcement_id] = announcement
 
         self.master.bind('<Configure>', update_grid)
         update_grid()
     
-    def refresh(self):
+    def refresh(self, announcements_data=None):
         # 清空当前公告
         for announcement in self.announcements:
             announcement.frame.destroy()
         self.announcements.clear()
-        
-        # 从数据库中获取公告数据
-        cursor.execute("SELECT idBoardList, headline, college, deadline, join_num, proposer_name, type FROM BoardList")
-        announcements_data = cursor.fetchall()
-        
-        # 从 UserAnnounceDiagram 中更新 join_num
-        for announcement in announcements_data:
-            cursor.execute("SELECT COUNT(*) FROM UserAnnounceDiagram WHERE announce_id = %s", (announcement[0],))
-            join_num = cursor.fetchone()[0]
-            cursor.execute("UPDATE BoardList SET join_num = %s WHERE idBoardList = %s", (join_num, announcement[0]))
-            db.commit()
-        
-        # 更新 join_num 后重新获取公告数据
-        cursor.execute("SELECT idBoardList, headline, college, deadline, join_num, proposer_name, type FROM BoardList")
-        announcements_data = cursor.fetchall()
+        announcement_list.clear()
         
         # 创建新的公告对象列表
         self.create_announcements(announcements_data)
         
+    def show_detail_content(self, announcement_id, title, content, is_add_in):
+        if self.detail_window and self.detail_window.winfo_exists():
+            self.detail_window.destroy()
+        self.detail_window = tk.Toplevel(self.master)
+        self.detail_window.title("公告详情")
+        self.detail_window.geometry("400x600")
+        
+        # 标题标签
+        title_label = tk.Label(self.detail_window, text=title, font=('微软雅黑', 14, 'bold'), anchor='w')
+        title_label.pack(pady=10)
+        
+        # 内容标签
+        content_label = tk.Label(self.detail_window, text=content, font=('微软雅黑', 12), wraplength=380, justify='left')
+        content_label.pack(pady=10)
+        
+        # 关注/取消关注按钮
+        if is_add_in:
+            disfollow_button = tk.Button(self.detail_window, text="取消关注", command=lambda: self.disfollow_announcement(current_user_id, announcement_id, self.detail_window))
+            disfollow_button.pack(pady=10)
+            # 进入聊天室按钮
+            enter_chatroom_button = tk.Button(self.detail_window, text="进入聊天室", command=lambda: self.enter_chatroom(announcement_id))
+            enter_chatroom_button.pack(pady=10)
+        else:
+            follow_button = tk.Button(self.detail_window, text="关注", command=lambda: self.follow_announcement(current_user_id, announcement_id, self.detail_window))
+            follow_button.pack(pady=10)
+
+    def enter_chatroom(self, announcement_id):
+        chatroom_gui = ChatroomGUI(chat_id=announcement_id)
+        chatroom_gui.run()
+        active_chatrooms[announcement_id] = chatroom_gui
+        
+    def follow_announcement(self, user_id, announcement_id, show_details_window):
+        request = {
+            "action": "follow_announcement",
+            "user_id": user_id,
+            "announcement_id": announcement_id
+        }
+        send_message_to_server(request)
+        self.detail_window.destroy()
+            
+    def disfollow_announcement(self, user_id, announcement_id, show_details_window):
+        request = {
+            "action": "disfollow_announcement",
+            "user_id": user_id,
+            "announcement_id": announcement_id
+        }
+        send_message_to_server(request)
+        self.detail_window.destroy()
+    
     def show_temporary_message(self, title, message):
         # 创建一个顶级窗口
         temp_window = tk.Toplevel(self.master)
@@ -469,27 +671,26 @@ class BoardGUI:
         
         # 设置定时器，3秒后关闭窗口
         temp_window.after(1000, temp_window.destroy)
-    
+        
+        
     def publish(self):
         # 发布公告的逻辑
-        if not is_login:
+        if not current_user_is_login:
             self.show_temporary_message("发布失败", "请先登录")
             return
         
-        if not user_id:
+        if not current_user_id:
             self.show_temporary_message("发布失败", "用户ID无效")
             return
         
-        cursor.execute("SELECT is_admin FROM UserInfo WHERE idUserInfo = %s", (user_id,))
-        is_admin = cursor.fetchone()[0]
-        
-        if not is_admin:
+        if not cuurent_user_is_admin:
             self.show_temporary_message("发布失败", "只有管理员可以发布公告")
             return
         
-        publish_window = tk.Toplevel(self.master)
+        publish_window = ttk.Toplevel()
         publish_window.title("发布公告")
         publish_window.geometry("400x800")
+        self.publish_window = publish_window
         
         # 标题标签和输入框
         title_label = tk.Label(publish_window, text="标题*:")
@@ -503,17 +704,21 @@ class BoardGUI:
         college_entry = tk.Entry(publish_window)
         college_entry.pack(pady=5)
         
-        # 截止时间标签和输入框
-        deadline_label = tk.Label(publish_window, text="截止时间* (YYYY-MM-DD HH:MM:SS):")
+        # 截止时间标签和选择器
+        deadline_label = tk.Label(publish_window, text="截止时间*:")
         deadline_label.pack(pady=10)
-        deadline_entry = tk.Entry(publish_window)
+        
+        # 使用ttkbootstrap的日期时间选择器
+        deadline_entry = ttk.DateEntry(publish_window, bootstyle="primary", dateformat="%Y-%m-%d %H:%M:%S")
         deadline_entry.pack(pady=5)
         
-        # 公告类型标签和输入框
+        # 公告类型标签和选择器
         type_label = tk.Label(publish_window, text="公告类型*:")
         type_label.pack(pady=10)
-        type_entry = tk.Entry(publish_window)
+        type_options = ["学业", "学术", "活动", "通知", "讲座", "比赛", "招聘", "志愿者", "社团活动", "研讨会", "其他"]
+        type_entry = ttk.Combobox(publish_window, values=type_options, state='readonly')
         type_entry.pack(pady=5)
+        type_entry.current(0)  # 默认选择第一个类型
         
         # 内容标签和输入框
         content_label = tk.Label(publish_window, text="内容*:")
@@ -522,24 +727,24 @@ class BoardGUI:
         content_text.pack(pady=5)
         
         # 提交按钮
-        submit_button = tk.Button(publish_window, text="提交", command=lambda: self.submit_announcement(title_entry.get(), college_entry.get(), deadline_entry.get(), type_entry.get(), content_text.get("1.0", tk.END), publish_window))
+        submit_button = tk.Button(publish_window, text="提交", command=lambda: self.submit_announcement(title_entry.get(), college_entry.get(), deadline_entry.entry.get(), type_entry.get(), content_text.get("1.0", tk.END), publish_window))
         submit_button.pack(pady=10)
         
     def submit_announcement(self, title, college, deadline, announcement_type, content, publish_window):
         if not title or not college or not deadline or not announcement_type or not content.strip():
             self.show_temporary_message("发布失败", "所有字段均为必填项")
             return
-        
-        try:
-            cursor.execute("INSERT INTO BoardList (headline, college, proposer_name, type, deadline, join_num, content) VALUES (%s, %s, %s, %s, %s, %s, %s)", (title, college, user_name, announcement_type, deadline, 0, content.strip()))
-            db.commit()
-            self.show_temporary_message("发布成功", "公告发布成功")
-            publish_window.destroy()
-            self.refresh()
-        except mysql.connector.Error as err:
-            print(f"Error: {err}")
-            self.show_temporary_message("发布失败", f"发布失败: {err}")
-            db.rollback()
+        request = {
+            "action": "submit_announcement",
+            "user_id": current_user_id,
+            "username": current_username,
+            "title": title,
+            "college": college,
+            "deadline": deadline,
+            "type": announcement_type,
+            "content": content
+        }
+        send_message_to_server(request)
     
     def on_closing(self):  
         if messagebox.askokcancel("退出", "确定要退出吗？"):
@@ -551,7 +756,12 @@ class BoardGUI:
     def show_all_announcements(self):
         self.current_tab = "all"
         self.highlight_current_tab()
-        self.refresh()
+        # 向服务器请求所有公告数据
+        request = {
+            "action": "refresh_announcement",
+            "user_id": current_user_id
+        }
+        send_message_to_server(request)
     
     def show_my_announcements(self):
         self.current_tab = "my"
@@ -561,17 +771,12 @@ class BoardGUI:
             announcement.frame.destroy()
         self.announcements.clear()
         
-        # 从数据库中获取我加入的公告数据
-        cursor.execute("""
-            SELECT b.idBoardList, b.headline, b.college, b.deadline, b.join_num, b.proposer_name, b.type 
-            FROM BoardList b
-            JOIN UserAnnounceDiagram uad ON b.idBoardList = uad.announce_id
-            WHERE uad.user_id = %s
-        """, (user_id,))
-        announcements_data = cursor.fetchall()
-        
-        # 创建新的公告对象列表
-        self.create_announcements(announcements_data)
+        # 从服务器获取我加入的公告数据
+        request = {
+            "action": "refresh_my_announcement",
+            "user_id": current_user_id
+        }
+        send_message_to_server(request)
     
     def highlight_current_tab(self):
         if self.current_tab == "all":
@@ -580,20 +785,19 @@ class BoardGUI:
         else:
             self.all_announcements_button.config(relief="raised", bg="SystemButtonFace")
             self.my_announcements_button.config(relief="sunken", bg="lightblue")
-
+    
+    
 class ChatroomGUI:
-    def __init__(self, chat_id=1):
+    def __init__(self, chat_id):
         self.master = tk.Tk()
-        # self.message_queue = queue.Queue()
-        # self.master.after(100, self.process_queue)
+        self.chat_id = chat_id
         self.master.title("聊天室")
         self.master.geometry("800x600")
         self.master.resizable(width=False, height=True)
         self.master.grid_rowconfigure(0, weight=1)
         self.master.grid_columnconfigure(0, weight=1)
-        self.user_id = 1
-        self.chat_id = chat_id
-
+        active_chatrooms[chat_id] = self
+        
         # 聊天记录框架
         self.chat_frame = tk.Frame(self.master)
         self.chat_frame.pack(fill='both', expand=True, pady=10)
@@ -615,14 +819,14 @@ class ChatroomGUI:
         
         self.canvas.pack(side="left", fill="both", expand=True)
         self.scrollbar.pack(side="right", fill="y")
-
+    
         # 绑定滚动事件
         self.canvas.bind_all('<MouseWheel>', self.on_mouse_wheel)
         self.canvas.bind_all('<Button-4>', self.on_mouse_wheel)  # For Linux
         self.canvas.bind_all('<Button-5>', self.on_mouse_wheel)  # For Linux
-
+    
         # 消息输入框
-        self.message_entry = tk.Text(self.master, font=('宋体', 12), height=3, wrap='word')
+        self.message_entry = tk.Text(self.master, font=('微软雅黑', 12), height=3, wrap='word')
         self.message_entry.pack(fill='x', pady=10)
         
         # 发送按钮
@@ -638,23 +842,24 @@ class ChatroomGUI:
         # 初始化最旧的消息时间戳
         self.oldest_timestamp = time.time()
         self.message_shown = []
-    # def process_queue(self):
-    #     while not self.message_queue.empty():
-    #         func, args = self.message_queue.get()
-    #         func(*args)  # Execute the function with arguments
-    #     self.master.after(100, self.process_queue)
-
+        
+    def on_close(self):
+        self.master.destroy()
+        del active_chatrooms[self.chat_id]
+    
     def adjust_textbox_height(self, event=None):
         lines = int(self.message_entry.index('end-1c').split('.')[0])
         self.message_entry.config(height=max(3, lines))
         
     def on_mouse_wheel(self, event):
+        SCROLL_THRESHOLD = 5  # 设置滚轮滚动距离阈值
         if event.delta > 0 and self.canvas.yview()[0] == 0.0:
-            self.refresh_older_messages()
+            if abs(event.delta) >= SCROLL_THRESHOLD:
+                self.refresh_older_messages()
         else:
             self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
             
-    def display_message(self, message, sender_id, sender_name, timestamp):
+    def display_message(self, message, sender_id, sender_name="我", timestamp=None, to_bottom=True):
         # 创建一个消息框架
         message_frame = tk.Frame(self.scrollable_frame, bd=2, relief=tk.SUNKEN, padx=5, pady=5, width=780)
         
@@ -663,24 +868,14 @@ class ChatroomGUI:
         info_frame.pack(side='left', fill='y', padx=5)
         
         # 显示发送者
-        sender_label = tk.Label(info_frame, text=sender_name, font=('宋体', 10, 'bold'), anchor='w', fg='blue', cursor="hand2")
+        sender_label = tk.Label(info_frame, text=sender_name, font=('微软雅黑', 10, 'bold'), anchor='w', fg='blue', cursor="hand2")
         sender_label.pack(fill='x')
-        sender_label.bind("<Button-1>", lambda e: self.show_user_details(sender_id, sender_name))
+        sender_label.bind("<Button-1>", lambda e: self.request_user_details(sender_id, sender_name))
         
         # 显示发送时间
-        # time_current=time.time()
-
-        # timestamp_float = timestamp.timestamp()
-
         if timestamp:
-            if isinstance(timestamp, str):
-                timestamp_obj = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
-                timestamp_float = timestamp_obj.timestamp()
-                time_diff = time.time() - timestamp_float
-            elif isinstance(timestamp, datetime):
-                time_diff = time.time() - timestamp.timestamp()
-            elif isinstance(timestamp, float):
-                time_diff = time.time() - timestamp
+            # 假设 timestamp 是字符串
+            time_diff = time.time() - time.mktime(time.strptime(timestamp, '%Y-%m-%d %H:%M:%S'))
             if time_diff < 60:
                 time_str = "刚刚"
             elif time_diff < 3600:
@@ -688,108 +883,68 @@ class ChatroomGUI:
             elif time_diff < 86400:
                 time_str = f"{int(time_diff // 3600)}小时前"
             else:
-                time_str = timestamp.strftime('%Y-%m-%d %H:%M')
+                time_str = timestamp
         else:
             time_str = ""
-        time_label = tk.Label(info_frame, text=time_str, font=('宋体', 8), anchor='w')
+        time_label = tk.Label(info_frame, text=time_str, font=('微软雅黑', 8), anchor='w')
         time_label.pack(fill='x')
         
         # 显示消息内容
-        message_label = tk.Label(message_frame, text=message, font=('宋体', 12), wraplength=700, justify='left')
+        message_label = tk.Label(message_frame, text=message, font=('微软雅黑', 12), wraplength=700, justify='left')
         message_label.pack(side='left', fill='x', expand=True)
         
-        if sender_id == self.user_id:
+        if sender_id == current_user_id:
             message_frame.pack(fill='x', pady=5, padx=10, anchor='e')
+            message_frame.config(width=780)
             message_frame.config(highlightbackground='blue', highlightthickness=2)
             info_frame.pack(side='right', fill='y', padx=5)
             message_label.config(justify='right')
-            message_label.pack(side='right')
-
+            message_label.pack_configure(side='right')
         else:
             message_frame.pack(fill='x', pady=5, padx=10, anchor='w')
+            message_frame.config(width=780)
             message_frame.config(highlightbackground='gray', highlightthickness=1)
             info_frame.pack(side='left', fill='y', padx=5)
             message_label.config(justify='left')
-            message_label.pack(side='left')
+            message_label.pack_configure(side='left')
         
         # 滚动到最新消息
+        if to_bottom:
+            self.canvas.update_idletasks()
+            self.canvas.yview_moveto(1.0)
+        self.message_shown.append({
+            "content": message,
+            "sender_id": sender_id,
+            "sender_name": sender_name,
+            "timestamp": timestamp
+        })
+        
+    def display_messages_upper(self, json_messages):
+        existed_messages = self.message_shown.copy()
+        self.message_shown.clear()
+        for widget in self.scrollable_frame.winfo_children():
+            widget.destroy()
+        for message in json_messages:
+            self.display_message(message['content'], message['sender_id'], message['sender_name'], message['timestamp'], to_bottom=False)
+            message_timestamp = time.mktime(time.strptime(message['timestamp'], '%Y-%m-%d %H:%M:%S'))
+            if message_timestamp < self.oldest_timestamp:
+                self.oldest_timestamp = message_timestamp
+        for message in existed_messages:
+            self.display_message(message['content'], message['sender_id'], message['sender_name'], message['timestamp'], to_bottom=False)
         self.canvas.update_idletasks()
-        self.canvas.yview_moveto(1.0)
-
-    def handle_server_message(self, message):
-        print(f"Running on thread: {threading.current_thread().name}")
-        action = message.get("action")
-        if action == "receive_message":
-            print("Message will be displayed soon.")
-            sender_id = message.get("sender_id")
-            content = message.get("content")
-            timestamp = message.get("timestamp")
-            sender_name = message.get("sender_name")
-
-            # Schedule GUI update on the main thread
-            if self.master:
-                self.master.after(0, lambda: self.display_message(content, sender_id, sender_name, timestamp))
-
-        # elif action == "login":
-        #     status = message.get("status")
-        #     if status == "success":
-        #         global current_user_id, current_username
-        #         current_user_id = message.get("user_id")
-        #         is_admin = message.get("is_admin")
-        #         current_username = app.login_gui.username_entry.get()
-        #         #app.login_success()
-        #     else:
-        #         error_msg = message.get("message")
-        #         #app.login_gui.show_temporary_message("登录失败", error_msg)
-
-
-    def receive_messages(self):
-        global connected
-        try:
-            while connected:
-                # 接收消息长度
-                print("Message received from server.")
-                msg_length_data = client_socket.recv(4)
-                if not msg_length_data:
-                    break
-                msg_length = int.from_bytes(msg_length_data, byteorder='big')
-                # 接收实际消息
-                msg_data = client_socket.recv(msg_length).decode()
-                message = json.loads(msg_data)
-                self.handle_server_message(message)
-        except Exception as e:
-            print(f"接收消息错误: {e}")
-        finally:
-            client_socket.close()
-            connected = False
-            print("与服务器的连接已关闭")            
-    def connect_to_server(self):
-        global client_socket, connected
-        try:
-            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_socket.connect(('localhost', 12345))
-            connected = True
-            print("成功连接到服务器")
-            
-            # Start the receive thread after GUI is initialized
-            self.master.after(0, self.start_receive_thread)
-        except Exception as e:
-            print(f"无法连接到服务器: {e}")
-            messagebox.showerror("连接错误", f"无法连接到服务器: {e}")
-
-    def start_receive_thread(self):
-        receive_thread = threading.Thread(target=self.receive_messages, daemon=True)
-        receive_thread.start()
-
+        self.canvas.yview_moveto(0.0)
         
-    def show_user_details(self, sender_id, sender_name):
+    def request_user_details(self, user_id, username):
+        # 请求用户详情
+        request = {
+            "action": "show_user_details",
+            "sender_id": user_id,
+            "chat_id": self.chat_id
+        }
+        send_message_to_server(request)
+        
+    def show_user_details(self, user_id, username, email, college, is_admin, bio):
         # 显示用户详情的逻辑
-        cursor.execute("SELECT username, college, email, is_admin, bio FROM UserInfo WHERE idUserInfo = %s", (sender_id,))
-        user_details = cursor.fetchone()
-        
-        if user_details:
-            username, college, email, is_admin, bio = user_details
-            
             user_details_window = tk.Toplevel(self.master)
             user_details_window.title("用户详情")
             user_details_window.geometry("400x300")
@@ -801,70 +956,39 @@ class ChatroomGUI:
             # 用户名和管理员标签
             username_frame = tk.Frame(details_frame)
             username_frame.grid(row=0, column=0, columnspan=2, pady=10, sticky='w')
-            username_title = tk.Label(username_frame, text=f"{username}", font=('宋体', 14, 'bold'), fg='black')
+            username_title = tk.Label(username_frame, text=f"{username}", font=('微软雅黑', 14, 'bold'), fg='black')
             username_title.pack(side='left')
             if is_admin:
-                admin_label = tk.Label(username_frame, text="管理员", font=('宋体', 10), fg='red', bg='lightblue')
+                admin_label = tk.Label(username_frame, text="管理员", font=('微软雅黑', 10), fg='red', bg='lightblue')
                 admin_label.pack(side='left', padx=5)
             
             # 院系
-            college_label = tk.Label(details_frame, text=f"{college}", font=('宋体', 12), anchor='w')
+            college_label = tk.Label(details_frame, text=f"{college}", font=('微软雅黑', 12), anchor='w')
             college_label.grid(row=1, column=0, sticky='w', pady=5)
             
             # 邮箱
-            email_label = tk.Label(details_frame, text=f"{email}", font=('宋体', 12), anchor='w')
+            email_label = tk.Label(details_frame, text=f"{email}", font=('微软雅黑', 12), anchor='w')
             email_label.grid(row=1, column=1, sticky='w', pady=5)
             
             # 简介
-            bio_label = tk.Label(details_frame, text=f"简介: {bio}", font=('宋体', 12), wraplength=350, justify='left')
+            bio_label = tk.Label(details_frame, text=f"简介: {bio}", font=('微软雅黑', 12), wraplength=350, justify='left')
             bio_label.grid(row=2, column=0, columnspan=2, sticky='w', pady=10)
-
+        
     def send_message(self):
-    # 发送消息的逻辑
+        # 发送消息的逻辑
         content = self.message_entry.get("1.0", tk.END).strip()
-        current_user_id=self.user_id
-        if not connected and content and current_user_id:
-            self.connect_to_server()
+        if content and connected and current_user_id:
             message = {
                 "action": "send_message",
                 "sender_id": current_user_id,
                 "chat_id": self.chat_id,
-                "sender_name":"我",
                 "content": content
             }
-            self.send_message_to_server(message)
-        elif connected and content and current_user_id:
-            message = {
-                "action": "send_message",
-                "sender_id": current_user_id,
-                "chat_id": self.chat_id,
-                "sender_name":"我",
-                "content": content
-            }
-            self.send_message_to_server(message)
-            #timestamp = datetime.now()
-            #self.display_message(content=content, sender_id=current_user_id, sender_name=current_username, timestamp=timestamp)
+            send_message_to_server(message)
+            # self.display_message(message=content, sender_id=current_user_id, sender_name=current_username, timestamp=time.strftime('%Y-%m-%d %H:%M:%S'))
             self.message_entry.delete("1.0", tk.END)
-        else:
-            print("用户或内容不存在，未发送消息到服务器")
-    
-    def send_message_to_server(self,message):
-        try:
-            msg = json.dumps(message).encode()
-            msg_length = len(msg).to_bytes(4, byteorder='big')
-            print("Message sent to server.")
-            client_socket.sendall(msg_length + msg)
-        except Exception as e:
-            print(f"发送消息错误: {e}")
-            messagebox.showerror("发送错误", f"发送消息失败: {e}")
-            raise  # Reraise the exception if needed
-    def notify_disconnection(self, error_message):
-        messagebox.showerror("连接错误", f"连接中断: {error_message}")
-
-    def close_connection(self):
-        print("清理资源并更新GUI")
-        # Any cleanup code, such as disabling buttons
-
+        elif not connected:
+            self.show_temporary_message("发送失败", "未连接到服务器")
     
     def send_message_on_enter(self, event):
         # 调用发送消息方法，忽略事件对象
@@ -873,82 +997,73 @@ class ChatroomGUI:
     def run(self):
         self.load_recent_messages()
         self.master.mainloop()
-
-    def load_recent_messages(self):
-        # 获取最近一天的聊天记录
-        cursor.execute("""
-            SELECT sender_id, sender_name, content, timestamp 
-            FROM ChatMessages 
-            WHERE idBoardList = %s AND timestamp >= NOW() - INTERVAL 1 DAY 
-            ORDER BY timestamp DESC
-        """, (self.chat_id,))
-        messages = cursor.fetchall()
-
-        for message in reversed(messages):
-            sender_id, sender_name, content, timestamp = message
-            self.display_message(sender_id=sender_id, sender_name=sender_name, message=content, timestamp=timestamp)
-            
-        self.oldest_timestamp = messages[-1][3] if messages else time.time()
-        print("已加载最近的消息")
-        print("最旧的消息时间戳:", self.oldest_timestamp)
-        self.message_shown.extend(messages)
-
-    def refresh_older_messages(self):
-        # 获取更早的聊天记录
-        cursor.execute("""
-            SELECT sender_id, sender_name, content, timestamp 
-            FROM ChatMessages 
-            WHERE idBoardList = %s AND timestamp < %s 
-            ORDER BY timestamp DESC 
-            LIMIT 20
-        """, (self.chat_id, self.oldest_timestamp))
-        messages = cursor.fetchall()
-        self.message_shown.extend(messages)
-        if messages:
-            self.oldest_timestamp = messages[-1][3]
-            current_scroll_position = self.canvas.yview()[0]
-            for widget in self.scrollable_frame.winfo_children():
-                widget.destroy()
-            for message in reversed(self.message_shown):
-                sender_id, sender_name, content, timestamp = message
-                self.display_message(sender_id=sender_id, sender_name=sender_name, message=content, timestamp=timestamp)
-            self.canvas.update_idletasks()
-            self.canvas.yview_moveto(current_scroll_position)
-        
-        print("已加载更早的消息")
-        print("最旧的消息时间戳:", self.oldest_timestamp)
-        return bool(messages)
     
+    def load_recent_messages(self):
+        if not connected:
+            self.show_temporary_message("连接错误", "未连接到服务器")
+            return
+    
+        # 向服务器请求最近的消息
+        request = {
+            "action": "load_recent_messages",
+            "chat_id": self.chat_id,
+            "user_id": current_user_id,
+            "timestamp": time.strftime('%Y-%m-%d %H:%M:%S')  # 当前时间作为参考
+        }
+        send_message_to_server(request)
+    
+    def refresh_older_messages(self):
+        # 从服务器加载更早的消息
+        if not connected:
+            self.show_temporary_message("连接错误", "未连接到服务器")
+            return
+    
+        # 向服务器请求更早的消息
+        request = {
+            "action": "refresh_older_messages",
+            "chat_id": self.chat_id,
+            "user_id": current_user_id,
+            "oldest_timestamp": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.oldest_timestamp))  # 当前最旧的消息时间戳
+        }
+        send_message_to_server(request)
+
+
 # 主程序
 if __name__ == "__main__":
-    try:
-        # 连接到数据库
-        db = mysql.connector.connect(
-            host="localhost",
-            user="root",
-            password="pjy530150",
-            database="COMM"
-        )
-        cursor = db.cursor()
-        print("数据库连接成功！")
-    except mysql.connector.Error as err:
-        print(f"Error: {err}")
-        messagebox.showerror("数据库连接错误", f"无法连接到数据库: {err}")
-        exit(1)
+    # try:
+    #     # 连接到数据库
+    #     db = mysql.connector.connect(
+    #         host="localhost",
+    #         user="Haerxile",
+    #         password="200518",
+    #         database="COMM",
+    #         consume_results=True 
+    #     )
+    #     cursor = db.cursor()
+    #     print("数据库连接成功！")
+    # except mysql.connector.Error as err:
+    #     print(f"Error: {err}")
+    #     messagebox.showerror("数据库连接错误", f"无法连接到数据库: {err}")
+    #     exit(1)
     
-    # 创建主窗口，显示公告板，可更换主题
-    is_login = False
-    user_id = None
-    user_name = None
+    # 初始化数据库数据（保持不变）
+    # ...
 
+    # 在程序结束时删除测试数据
+    # 保持不变
     
+    # 创建主窗口，显示登录界面
     root = ttk.Window()
     style = ttk.Style()
     style.theme_use('')
     
-    app = LoginGUI(master=root)
+    if root:
+        # 连接到服务器
+        connect_to_server()
+    
+    login_ui = LoginGUI(root)
     root.mainloop()
     
     # 关闭数据库连接
-    cursor.close()
-    db.close()
+    # cursor.close()
+    # db.close()

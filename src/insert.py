@@ -9,8 +9,8 @@ if __name__ == "__main__":
         # 连接到数据库
         db = mysql.connector.connect(
             host="localhost",
-            user="root",
-            password="pjy530150",
+            user="Haerxile",
+            password="200518",
             database="COMM"
         )
         cursor = db.cursor()
@@ -93,7 +93,7 @@ if __name__ == "__main__":
     for message in test_massage:
         cursor.execute("INSERT INTO ChatMessages (idChatMessages, idBoardList, sender_id, sender_name, content, timestamp) VALUES (%s, %s, %s, %s, %s, %s)", message)
     for user in test_user:
-        cursor.execute("INSERT INTO UserInfo (idUserInfo, username, passwoord, college, email, is_admin, bio, profile_pictrue) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", user)
+        cursor.execute("INSERT INTO UserInfo (idUserInfo, username, password, college, email, is_admin, bio, profile_pictrue) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", user)
     for diagram in test_Diagram:
         cursor.execute("INSERT INTO UserAnnounceDiagram (idUserAnnounceDiagram, user_id, announce_id) VALUES (%s, %s, %s)", diagram)
     db.commit()
