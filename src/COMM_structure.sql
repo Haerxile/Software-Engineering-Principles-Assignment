@@ -51,7 +51,7 @@ CREATE TABLE `ChatMessages` (
   `idChatMessages` int unsigned NOT NULL AUTO_INCREMENT,
   `idBoardList` int NOT NULL,
   `sender_id` int NOT NULL,
-  `sender_name` varchar(45) NOT NULL,
+  `sender_name` varchar(45) NOT NULL DEFAULT '我',
   `content` longtext NOT NULL,
   `timestamp` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`idChatMessages`),
