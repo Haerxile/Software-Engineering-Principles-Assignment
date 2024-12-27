@@ -7,6 +7,7 @@ import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 # import mysql.connector
 import time
+from datetime import datetime, timedelta
 import atexit
 
 import queue
@@ -284,6 +285,16 @@ def handle_server_message(message):
                 board_ui.master.after(0, lambda: board_ui.show_temporary_message("获取用户详情失败", error_msg))
             else:
                 print("公告板窗口不存在")
+    elif action == "recommend_announcements":
+        status = message.get("status")
+        if status == "success":
+            recommended_announcements = message.get("recommended_announcements")
+            print(f"处理推荐公告: {recommended_announcements}")
+            if board_ui:
+                board_ui.master.after(0, lambda: board_ui.display_recommended_announcements(recommended_announcements))
+        else:
+            error_msg = message.get("message")
+            print(f"获取推荐公告失败: {error_msg}")
     # 处理其他类型的消息
     else:
         print(f"未知消息类型: {action}")
@@ -544,6 +555,37 @@ class BoardGUI:
         self.publish_button = tk.Button(theme_selection, text="发布公告", command=self.publish)
         self.publish_button.pack(side='left', padx=5)
         
+        # 推荐公告按钮
+        self.recommend_button = tk.Button(theme_selection, text="魔法推荐", command=self.request_recommended_announcements)
+        self.recommend_button.pack(side='left', padx=5)
+        
+        # 添加图例框架，默认隐藏
+        self.legend_frame = tk.Frame(theme_selection, bd=2, relief=tk.RIDGE, padx=10, pady=10)
+        self.legend_frame.pack(fill='x', pady=10)
+        self.legend_frame.pack_forget()  # 初始隐藏图例
+
+        # 推荐公告图例
+        recommended_legend = tk.Frame(self.legend_frame)
+        recommended_legend.pack(side='left', padx=10)
+        recommended_label = tk.Label(recommended_legend, text="猜你喜欢", font=('微软雅黑', 10))
+        recommended_label.pack(side='left')
+        recommended_legend.config(highlightbackground='blue', highlightthickness=1)
+
+        # 即将截止公告图例
+        deadline_legend = tk.Frame(self.legend_frame)
+        deadline_legend.pack(side='left', padx=10)
+        deadline_label = tk.Label(deadline_legend, text="即将截止", font=('微软雅黑', 10))
+        deadline_label.pack(side='left')
+        deadline_legend.config(highlightbackground='red', highlightthickness=1)
+
+        # 新发布公告图例
+        # new_legend = tk.Frame(self.legend_frame)
+        # new_legend.pack(anchor='w', pady=5)
+        # new_color = tk.Label(new_legend, text="   ", bg='green', bd=1, relief=tk.SOLID)
+        # new_color.pack(side='left', padx=5)
+        # new_label = tk.Label(new_legend, text="新发布", font=('微软雅黑', 10))
+        # new_label.pack(side='left')
+        
         # 创建一个画布和滚动条
         self.canvas = tk.Canvas(self.master)
         self.scrollbar = tk.Scrollbar(self.master, orient="vertical", command=self.canvas.yview)
@@ -581,6 +623,7 @@ class BoardGUI:
         self.highlight_current_tab()
         
         self.announcements = []
+        self.json_announcements = {}
         self.chatroom = None  # 添加一个属性用于存储当前聊天室
         # 初始显示所有公告
         self.show_all_announcements()
@@ -606,6 +649,8 @@ class BoardGUI:
             announcement.frame.destroy()
         self.announcements.clear()
         announcement_list.clear()
+        
+        self.json_announcements = announcements_data
         
         # 创建新的公告对象列表
         self.create_announcements(announcements_data)
@@ -756,6 +801,8 @@ class BoardGUI:
     def show_all_announcements(self):
         self.current_tab = "all"
         self.highlight_current_tab()
+        # 隐藏图例
+        self.legend_frame.pack_forget()
         # 向服务器请求所有公告数据
         request = {
             "action": "refresh_announcement",
@@ -766,6 +813,8 @@ class BoardGUI:
     def show_my_announcements(self):
         self.current_tab = "my"
         self.highlight_current_tab()
+        # 隐藏图例
+        self.legend_frame.pack_forget()
         # 清空当前公告
         for announcement in self.announcements:
             announcement.frame.destroy()
@@ -785,6 +834,83 @@ class BoardGUI:
         else:
             self.all_announcements_button.config(relief="raised", bg="SystemButtonFace")
             self.my_announcements_button.config(relief="sunken", bg="lightblue")
+            
+    def display_recommended_announcements(self, recommended_announcements):
+        # 显示图例
+        self.legend_frame.pack(fill='x', pady=10)
+        # 清空当前公告
+        for announcement in self.announcements:
+            announcement.frame.destroy()
+        self.announcements.clear()
+        announcement_list.clear()
+        
+        recommended_announcements = [str(announcement_id) for announcement_id in recommended_announcements]
+
+        # 获取所有公告数据
+        all_announcements = self.json_announcements
+
+        # 将公告分为三类：推荐的、即将截止的、新发布的
+        recommended = []
+        deadline_approaching = []
+        newly_published = []
+
+        for announcement_id, announcement_data in all_announcements.items():
+            # print(f"Announcement: {announcement_id}, announcement_id_type: {type(announcement_id)}, {announcement_data}")
+            if announcement_id in recommended_announcements:
+                recommended.append((announcement_id, announcement_data))
+                print(f"Recommended: {announcement_id}, {announcement_data}")
+            if self.is_deadline_approaching(announcement_data['deadline']):
+                deadline_approaching.append((announcement_id, announcement_data))
+            # elif self.is_newly_published(announcement_data['propose_time']):
+            #     newly_published.append((announcement_id, announcement_data))
+
+        # 按照推荐、即将截止、新发布的顺序显示公告
+        for announcement_id, announcement_data in recommended + deadline_approaching + newly_published:
+            announcement = Announcement(self.scrollable_frame, announcement_id, announcement_data['headline'], announcement_data['college'], announcement_data['deadline'], announcement_data['join_num'], announcement_data['proposer_name'], announcement_data['type'])
+            self.announcements.append(announcement)
+            announcement_list[announcement_id] = announcement
+
+            # 根据公告类型设置不同的边框颜色
+            if announcement_id in recommended_announcements:
+                announcement.frame.config(highlightbackground='blue', highlightthickness=2)
+            if self.is_deadline_approaching(announcement_data['deadline']):
+                announcement.frame.config(highlightbackground='red', highlightthickness=2)
+            # elif self.is_newly_published(announcement_data['propose_time']):
+            #     announcement.frame.config(highlightbackground='green', highlightthickness=2)
+
+        def update_grid(event=None):
+            width = self.master.winfo_width()
+            columns = max(1, width // 400)  # 每列宽度约为400像素
+            for i, announcement in enumerate(self.announcements):
+                announcement.frame.grid(row=i // columns, column=i % columns, padx=10, pady=10, sticky='nsew')
+
+        self.master.bind('<Configure>', update_grid)
+        update_grid()
+
+    def is_deadline_approaching(self, deadline):
+        # 判断公告的截止时间是否临近（例如，距离截止时间还有不到24小时）
+        deadline_time = datetime.strptime(deadline, '%Y-%m-%d %H:%M:%S')
+        current_time = datetime.now()
+        time_diff = deadline_time - current_time
+        is_approaching = (time_diff.total_seconds() < 24 * 3600) and (time_diff.total_seconds() > 0) # 24小时
+        print(f"Deadline: {deadline}, Current Time: {current_time}, Time Diff: {time_diff.total_seconds()}, Is Approaching: {is_approaching}")
+        return is_approaching
+
+    def is_newly_published(self, timestamp):
+        # 判断公告是否是最近发布的（例如，发布时间在24小时内）
+        publish_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+        current_time = datetime.now()
+        time_diff = current_time - publish_time
+        return time_diff.total_seconds() < 24 * 3600  # 24小时
+        
+    def request_recommended_announcements(self):
+        if connected and current_user_id:
+            request = {
+                "action": "recommend_announcements",
+                "user_id": current_user_id
+            }
+            self.show_temporary_message("获取推荐公告", "正在为您个性化推荐...")
+            send_message_to_server(request)
     
     
 class ChatroomGUI:

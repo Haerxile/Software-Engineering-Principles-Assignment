@@ -339,6 +339,16 @@ def handle_client(conn, addr):
                 else:
                     response = {"action": "show_user_details", "status": "fail", "message": "获取用户信息失败"}
                 send_message(conn, response)
+                
+            elif action == "recommend_announcements":
+                user_id = data.get("user_id")
+                recommended_announcements = recommend_announcements(user_id)
+                response = {
+                    "action": "recommend_announcements",
+                    "status": "success",
+                    "recommended_announcements": recommended_announcements
+                }
+                send_message(conn, response)
             # 其他操作如注册、关注等可在此扩展
 
     except Exception as e:
@@ -373,6 +383,71 @@ def start_server():
         server.close()
         cursor.close()
         db.close()
+        
+def recommend_announcements(user_id):
+    # 获取所有公告
+    cursor.execute("SELECT idBoardList, headline, college, deadline, join_num, proposer_name, type FROM BoardList")
+    announcements = cursor.fetchall()
+    db.commit()
+
+    # 获取用户参与的公告
+    cursor.execute("SELECT announce_id FROM UserAnnounceDiagram WHERE user_id = %s", (user_id,))
+    user_announcements = [row[0] for row in cursor.fetchall()]
+    db.commit()
+
+    # 构建用户-项目矩阵
+    user_item_matrix = {}
+    cursor.execute("SELECT user_id, announce_id FROM UserAnnounceDiagram")
+    for row in cursor.fetchall():
+        user_id_matrix, announce_id = row
+        if user_id_matrix not in user_item_matrix:
+            user_item_matrix[user_id_matrix] = set()
+        user_item_matrix[user_id_matrix].add(announce_id)
+    db.commit()
+
+    # 计算用户相似度（余弦相似度）
+    def cosine_similarity(u, v):
+        common_announcements = user_item_matrix[u].intersection(user_item_matrix[v])
+        if not common_announcements:
+            return 0
+        numerator = len(common_announcements)
+        denominator = (len(user_item_matrix[u]) * len(user_item_matrix[v])) ** 0.5
+        return numerator / denominator
+
+    # 找到与当前用户最相似的 k 个用户
+    k = 5
+    similar_users = []
+    for other_user in user_item_matrix:
+        if other_user != user_id:
+            similarity = cosine_similarity(user_id, other_user)
+            if similarity > 0:  # 过滤掉相似度为 0 的用户
+                similar_users.append((other_user, similarity))
+    similar_users.sort(key=lambda x: x[1], reverse=True)
+    similar_users = similar_users[:k]
+
+    # 计算推荐评分
+    recommendation_scores = {}
+    for announcement in announcements:
+        announcement_id = announcement[0]
+        join_num = announcement[4]  # 参与人数
+        if announcement_id not in user_announcements:
+            score = 0
+            for other_user, similarity in similar_users:
+                if announcement_id in user_item_matrix[other_user]:
+                    score += similarity
+            # 加入参与人数作为权重
+            score *= (1 + join_num * 0.1)  # 参与人数越多，权重越高
+            recommendation_scores[announcement_id] = score
+
+    # 过滤掉评分为 0 的公告
+    recommendation_scores = {announcement_id: score for announcement_id, score in recommendation_scores.items() if score > 0}
+
+    # 按推荐评分排序
+    recommended_announcements = sorted(recommendation_scores.items(), key=lambda x: x[1], reverse=True)
+    recommended_announcements = [announcement[0] for announcement in recommended_announcements]
+
+    # 返回推荐的公告列表
+    return recommended_announcements
 
 if __name__ == "__main__":
     start_server()
