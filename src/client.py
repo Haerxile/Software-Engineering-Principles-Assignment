@@ -42,7 +42,7 @@ def connect_to_server():
     global client_socket, connected
     try:
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client_socket.connect(('localhost', 10086))  # 服务器地址和端口
+        client_socket.connect(('10.129.243.151', 10086))  # 服务器地址和端口
         connected = True
         print("成功连接到服务器")
         # 启动接收线程
